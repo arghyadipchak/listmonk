@@ -24,6 +24,7 @@ import (
 	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/bounce/mailbox"
+	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -49,23 +50,31 @@ const (
 
 // constants contains static, constant config values required by the app.
 type constants struct {
+	SiteName              string   `koanf:"site_name"`
 	RootURL               string   `koanf:"root_url"`
 	LogoURL               string   `koanf:"logo_url"`
 	FaviconURL            string   `koanf:"favicon_url"`
 	FromEmail             string   `koanf:"from_email"`
 	NotifyEmails          []string `koanf:"notify_emails"`
 	EnablePublicSubPage   bool     `koanf:"enable_public_subscription_page"`
+	EnablePublicArchive   bool     `koanf:"enable_public_archive"`
 	SendOptinConfirmation bool     `koanf:"send_optin_confirmation"`
 	Lang                  string   `koanf:"lang"`
 	DBBatchSize           int      `koanf:"batch_size"`
 	Privacy               struct {
 		IndividualTracking bool            `koanf:"individual_tracking"`
+		AllowPreferences   bool            `koanf:"allow_preferences"`
 		AllowBlocklist     bool            `koanf:"allow_blocklist"`
 		AllowExport        bool            `koanf:"allow_export"`
 		AllowWipe          bool            `koanf:"allow_wipe"`
 		Exportable         map[string]bool `koanf:"-"`
 		DomainBlocklist    map[string]bool `koanf:"-"`
 	} `koanf:"privacy"`
+	Security struct {
+		EnableCaptcha bool   `koanf:"enable_captcha"`
+		CaptchaKey    string `koanf:"captcha_key"`
+		CaptchaSecret string `koanf:"captcha_secret"`
+	} `koanf:"security"`
 	AdminUsername []byte `koanf:"admin_username"`
 	AdminPassword []byte `koanf:"admin_password"`
 
@@ -81,6 +90,7 @@ type constants struct {
 	ViewTrackURL  string
 	OptinURL      string
 	MessageURL    string
+	ArchiveURL    string
 	MediaProvider string
 
 	BounceWebhooksEnabled bool
@@ -244,6 +254,7 @@ func initDB() *sqlx.DB {
 		Password    string        `koanf:"password"`
 		DBName      string        `koanf:"database"`
 		SSLMode     string        `koanf:"ssl_mode"`
+		Params      string        `koanf:"params"`
 		MaxOpen     int           `koanf:"max_open"`
 		MaxIdle     int           `koanf:"max_idle"`
 		MaxLifetime time.Duration `koanf:"max_lifetime"`
@@ -254,7 +265,7 @@ func initDB() *sqlx.DB {
 
 	lo.Printf("connecting to db: %s:%d/%s", c.Host, c.Port, c.DBName)
 	db, err := sqlx.Connect("postgres",
-		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode))
+		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s %s", c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, c.Params))
 	if err != nil {
 		lo.Fatalf("error connecting to DB: %v", err)
 	}
@@ -283,19 +294,25 @@ func readQueries(sqlFile string, db *sqlx.DB, fs stuffbin.FileSystem) goyesql.Qu
 
 // prepareQueries queries prepares a query map and returns a *Queries
 func prepareQueries(qMap goyesql.Queries, db *sqlx.DB, ko *koanf.Koanf) *models.Queries {
-	// The campaign view/click count queries have a COUNT(%s) placeholder that should either
-	// be substituted with * to pull non-unique rows when individual subscriber tracking is off
-	// as all subscriber_ids will be null, or with DISTINCT subscriber_id when tracking is on
-	// to only pull unique rows per subscriber.
-	sel := "*"
+	var (
+		countQuery = "get-campaign-analytics-counts"
+		linkSel    = "*"
+	)
 	if ko.Bool("privacy.individual_tracking") {
-		sel = "DISTINCT subscriber_id"
+		countQuery = "get-campaign-analytics-unique-counts"
+		linkSel = "DISTINCT subscriber_id"
 	}
 
-	keys := []string{"get-campaign-view-counts", "get-campaign-click-counts", "get-campaign-link-counts"}
-	for _, k := range keys {
-		qMap[k].Query = fmt.Sprintf(qMap[k].Query, sel)
+	// These don't exist in the SQL file but are in the queries struct to be prepared.
+	qMap["get-campaign-view-counts"] = &goyesql.Query{
+		Query: fmt.Sprintf(qMap[countQuery].Query, "campaign_views"),
+		Tags:  map[string]string{"name": "get-campaign-view-counts"},
 	}
+	qMap["get-campaign-click-counts"] = &goyesql.Query{
+		Query: fmt.Sprintf(qMap[countQuery].Query, "link_clicks"),
+		Tags:  map[string]string{"name": "get-campaign-click-counts"},
+	}
+	qMap["get-campaign-link-counts"].Query = fmt.Sprintf(qMap["get-campaign-link-counts"].Query, linkSel)
 
 	// Scan and prepare all queries.
 	var q models.Queries
@@ -340,6 +357,9 @@ func initConstants() *constants {
 	if err := ko.Unmarshal("privacy", &c.Privacy); err != nil {
 		lo.Fatalf("error loading app.privacy config: %v", err)
 	}
+	if err := ko.Unmarshal("security", &c.Security); err != nil {
+		lo.Fatalf("error loading app.security config: %v", err)
+	}
 	if err := ko.UnmarshalWithConf("appearance", &c.Appearance, koanf.UnmarshalConf{FlatPaths: true}); err != nil {
 		lo.Fatalf("error loading app.appearance config: %v", err)
 	}
@@ -362,6 +382,9 @@ func initConstants() *constants {
 
 	// url.com/link/{campaign_uuid}/{subscriber_uuid}
 	c.MessageURL = fmt.Sprintf("%s/campaign/%%s/%%s", c.RootURL)
+
+	// url.com/archive
+	c.ArchiveURL = c.RootURL + "/archive"
 
 	// url.com/campaign/{campaign_uuid}/{subscriber_uuid}/px.png
 	c.ViewTrackURL = fmt.Sprintf("%s/campaign/%%s/%%s/px.png", c.RootURL)
@@ -417,6 +440,7 @@ func initCampaignManager(q *models.Queries, cs *constants, app *App) *manager.Ma
 		LinkTrackURL:          cs.LinkTrackURL,
 		ViewTrackURL:          cs.ViewTrackURL,
 		MessageURL:            cs.MessageURL,
+		ArchiveURL:            cs.ArchiveURL,
 		UnsubHeader:           ko.Bool("privacy.unsubscribe_header"),
 		SlidingWindow:         ko.Bool("app.message_sliding_window"),
 		SlidingWindowDuration: ko.Duration("app.message_sliding_window_duration"),
@@ -424,6 +448,22 @@ func initCampaignManager(q *models.Queries, cs *constants, app *App) *manager.Ma
 		ScanInterval:          time.Second * 5,
 		ScanCampaigns:         !ko.Bool("passive"),
 	}, newManagerStore(q), campNotifCB, app.i18n, lo)
+}
+
+func initTxTemplates(m *manager.Manager, app *App) {
+	tpls, err := app.core.GetTemplates(models.TemplateTypeTx, false)
+	if err != nil {
+		lo.Fatalf("error loading transactional templates: %v", err)
+	}
+
+	for _, t := range tpls {
+		tpl := t
+		if err := tpl.Compile(app.manager.GenericTemplateFuncs()); err != nil {
+			lo.Printf("error compiling transactional template %d: %v", tpl.ID, err)
+			continue
+		}
+		m.CacheTpl(tpl.ID, &tpl)
+	}
 }
 
 // initImporter initializes the bulk subscriber importer.
@@ -565,6 +605,9 @@ func initNotifTemplates(path string, fs stuffbin.FileSystem, i *i18n.I18n, cs *c
 		"L": func() *i18n.I18n {
 			return i
 		},
+		"Safe": func(safeHTML string) template.HTML {
+			return template.HTML(safeHTML)
+		},
 	}
 
 	tpls, err := stuffbin.ParseTemplatesGlob(funcs, fs, "/static/email-templates/*.html")
@@ -591,7 +634,7 @@ func initNotifTemplates(path string, fs stuffbin.FileSystem, i *i18n.I18n, cs *c
 	h := make([]byte, ln)
 	copy(h, html[0:ln])
 
-	if !bytes.Contains(bytes.ToLower(h), []byte("<!doctype html>")) {
+	if !bytes.Contains(bytes.ToLower(h), []byte("<!doctype html")) {
 		out.contentType = models.CampaignContentTypePlain
 		lo.Println("system e-mail templates are plaintext")
 	}
@@ -661,10 +704,14 @@ func initHTTPServer(app *App) *echo.Echo {
 		lo.Fatalf("error parsing public templates: %v", err)
 	}
 	srv.Renderer = &tplRenderer{
-		templates:  tpl,
-		RootURL:    app.constants.RootURL,
-		LogoURL:    app.constants.LogoURL,
-		FaviconURL: app.constants.FaviconURL}
+		templates:           tpl,
+		SiteName:            app.constants.SiteName,
+		RootURL:             app.constants.RootURL,
+		LogoURL:             app.constants.LogoURL,
+		FaviconURL:          app.constants.FaviconURL,
+		EnablePublicSubPage: app.constants.EnablePublicSubPage,
+		EnablePublicArchive: app.constants.EnablePublicArchive,
+	}
 
 	// Initialize the static file server.
 	fSrv := app.fs.FileServer()
@@ -695,6 +742,12 @@ func initHTTPServer(app *App) *echo.Echo {
 	}()
 
 	return srv
+}
+
+func initCaptcha() *captcha.Captcha {
+	return captcha.New(captcha.Opt{
+		CaptchaSecret: ko.String("security.captcha_secret"),
+	})
 }
 
 func awaitReload(sigChan chan os.Signal, closerWait chan bool, closer func()) chan bool {

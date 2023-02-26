@@ -53,7 +53,7 @@ var (
 		Email:   "demo@listmonk.app",
 		Name:    "Demo Subscriber",
 		UUID:    dummyUUID,
-		Attribs: models.SubscriberAttribs{"city": "Bengaluru"},
+		Attribs: models.JSON{"city": "Bengaluru"},
 	}
 
 	subQuerySortFields = []string{"email", "name", "created_at", "updated_at"}
@@ -84,7 +84,7 @@ func handleGetSubscriber(c echo.Context) error {
 func handleQuerySubscribers(c echo.Context) error {
 	var (
 		app = c.Get("app").(*App)
-		pg  = getPagination(c.QueryParams(), 30)
+		pg  = app.paginator.NewFromURL(c.Request().URL.Query())
 
 		// The "WHERE ?" bit.
 		query   = sanitizeSQLExp(c.FormValue("query"))
@@ -212,7 +212,7 @@ func handleCreateSubscriber(c echo.Context) error {
 	}
 
 	// Insert the subscriber into the DB.
-	sub, _, err := app.core.CreateSubscriber(req.Subscriber, req.Lists, req.ListUUIDs, req.PreconfirmSubs)
+	sub, _, err := app.core.InsertSubscriber(req.Subscriber, req.Lists, req.ListUUIDs, req.PreconfirmSubs)
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func handleUpdateSubscriber(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("subscribers.invalidName"))
 	}
 
-	out, err := app.core.UpdateSubscriber(id, req.Subscriber, req.Lists, req.PreconfirmSubs)
+	out, err := app.core.UpdateSubscriberWithLists(id, req.Subscriber, req.Lists, nil, req.PreconfirmSubs, true)
 	if err != nil {
 		return err
 	}
@@ -364,7 +364,7 @@ func handleManageSubscriberLists(c echo.Context) error {
 	case "remove":
 		err = app.core.DeleteSubscriptions(subIDs, req.TargetListIDs)
 	case "unsubscribe":
-		err = app.core.UnsubscribeLists(subIDs, req.TargetListIDs)
+		err = app.core.UnsubscribeLists(subIDs, req.TargetListIDs, nil)
 	default:
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("subscribers.invalidAction"))
 	}

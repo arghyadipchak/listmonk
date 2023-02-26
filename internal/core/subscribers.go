@@ -34,7 +34,8 @@ func (c *Core) GetSubscriber(id int, uuid, email string) (models.Subscriber, err
 	}
 	if len(out) == 0 {
 		return models.Subscriber{}, echo.NewHTTPError(http.StatusBadRequest,
-			c.i18n.Ts("globals.messages.notFound", "name", "{globals.terms.subscriber}"))
+			c.i18n.Ts("globals.messages.notFound", "name",
+				fmt.Sprintf("{globals.terms.subscriber} (%d: %s%s)", id, uuid, email)))
 	}
 	if err := out.LoadLists(c.q.GetSubscriberListsLazy); err != nil {
 		c.log.Printf("error loading subscriber lists: %v", err)
@@ -113,7 +114,8 @@ func (c *Core) QuerySubscribers(query string, listIDs []int, order, orderBy stri
 
 	// Run the query again and fetch the actual data. stmt is the raw SQL query.
 	var out models.Subscribers
-	stmt = fmt.Sprintf(c.q.QuerySubscribers, cond, orderBy, order)
+	stmt = strings.ReplaceAll(c.q.QuerySubscribers, "%query%", cond)
+	stmt = strings.ReplaceAll(stmt, "%order%", orderBy+" "+order)
 	if err := tx.Select(&out, stmt, pq.Array(listIDs), offset, limit); err != nil {
 		return nil, 0, echo.NewHTTPError(http.StatusInternalServerError,
 			c.i18n.Ts("globals.messages.errorFetching", "name", "{globals.terms.subscribers}", "error", pqErrMsg(err)))
@@ -186,6 +188,7 @@ func (c *Core) ExportSubscribers(query string, subIDs, listIDs []int, batchSize 
 	}
 
 	stmt := fmt.Sprintf(c.q.QuerySubscribersForExport, cond)
+	stmt = strings.ReplaceAll(c.q.QuerySubscribersForExport, "%query%", cond)
 
 	// Verify that the arbitrary SQL search expression is read only.
 	if cond != "" {
@@ -235,10 +238,10 @@ func (c *Core) ExportSubscribers(query string, subIDs, listIDs []int, batchSize 
 	}, nil
 }
 
-// insertSubscriber inserts a subscriber and returns the ID. The first bool indicates if
+// InsertSubscriber inserts a subscriber and returns the ID. The first bool indicates if
 // it was a new subscriber, and the second bool indicates if the subscriber was sent an optin confirmation.
 // bool = optinSent?
-func (c *Core) CreateSubscriber(sub models.Subscriber, listIDs []int, listUUIDs []string, preconfirm bool) (models.Subscriber, bool, error) {
+func (c *Core) InsertSubscriber(sub models.Subscriber, listIDs []int, listUUIDs []string, preconfirm bool) (models.Subscriber, bool, error) {
 	uu, err := uuid.NewV4()
 	if err != nil {
 		c.log.Printf("error generating UUID: %v", err)
@@ -302,12 +305,7 @@ func (c *Core) CreateSubscriber(sub models.Subscriber, listIDs []int, listUUIDs 
 }
 
 // UpdateSubscriber updates a subscriber's properties.
-func (c *Core) UpdateSubscriber(id int, sub models.Subscriber, listIDs []int, preconfirm bool) (models.Subscriber, error) {
-	subStatus := models.SubscriptionStatusUnconfirmed
-	if preconfirm {
-		subStatus = models.SubscriptionStatusConfirmed
-	}
-
+func (c *Core) UpdateSubscriber(id int, sub models.Subscriber) (models.Subscriber, error) {
 	// Format raw JSON attributes.
 	attribs := []byte("{}")
 	if len(sub.Attribs) > 0 {
@@ -325,13 +323,55 @@ func (c *Core) UpdateSubscriber(id int, sub models.Subscriber, listIDs []int, pr
 		strings.TrimSpace(sub.Name),
 		sub.Status,
 		json.RawMessage(attribs),
-		pq.Array(listIDs),
-		subStatus)
+	)
 	if err != nil {
 		c.log.Printf("error updating subscriber: %v", err)
 		return models.Subscriber{}, echo.NewHTTPError(http.StatusInternalServerError,
-			c.i18n.Ts("globals.messages.errorUpdating",
-				"name", "{globals.terms.subscriber}", "error", pqErrMsg(err)))
+			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.subscriber}", "error", pqErrMsg(err)))
+	}
+
+	out, err := c.GetSubscriber(sub.ID, "", sub.Email)
+	if err != nil {
+		return models.Subscriber{}, err
+	}
+
+	return out, nil
+}
+
+// UpdateSubscriberWithLists updates a subscriber's properties.
+// If deleteLists is set to true, all existing subscriptions are deleted and only
+// the ones provided are added or retained.
+func (c *Core) UpdateSubscriberWithLists(id int, sub models.Subscriber, listIDs []int, listUUIDs []string, preconfirm, deleteLists bool) (models.Subscriber, error) {
+	subStatus := models.SubscriptionStatusUnconfirmed
+	if preconfirm {
+		subStatus = models.SubscriptionStatusConfirmed
+	}
+
+	// Format raw JSON attributes.
+	attribs := []byte("{}")
+	if len(sub.Attribs) > 0 {
+		if b, err := json.Marshal(sub.Attribs); err != nil {
+			return models.Subscriber{}, echo.NewHTTPError(http.StatusInternalServerError,
+				c.i18n.Ts("globals.messages.errorUpdating",
+					"name", "{globals.terms.subscriber}", "error", err.Error()))
+		} else {
+			attribs = b
+		}
+	}
+
+	_, err := c.q.UpdateSubscriberWithLists.Exec(id,
+		sub.Email,
+		strings.TrimSpace(sub.Name),
+		sub.Status,
+		json.RawMessage(attribs),
+		pq.Array(listIDs),
+		pq.Array(listUUIDs),
+		subStatus,
+		deleteLists)
+	if err != nil {
+		c.log.Printf("error updating subscriber: %v", err)
+		return models.Subscriber{}, echo.NewHTTPError(http.StatusInternalServerError,
+			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.subscriber}", "error", pqErrMsg(err)))
 	}
 
 	out, err := c.GetSubscriber(sub.ID, "", sub.Email)
@@ -355,7 +395,7 @@ func (c *Core) BlocklistSubscribers(subIDs []int) error {
 
 // BlocklistSubscribersByQuery blocklists the given list of subscribers.
 func (c *Core) BlocklistSubscribersByQuery(query string, listIDs []int) error {
-	if err := c.q.ExecSubscriberQueryTpl(sanitizeSQLExp(query), c.q.BlocklistSubscribersByQuery, listIDs, c.db); err != nil {
+	if err := c.q.ExecSubQueryTpl(sanitizeSQLExp(query), c.q.BlocklistSubscribersByQuery, listIDs, c.db); err != nil {
 		c.log.Printf("error blocklisting subscribers: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError,
 			c.i18n.Ts("subscribers.errorBlocklisting", "error", pqErrMsg(err)))
@@ -384,7 +424,7 @@ func (c *Core) DeleteSubscribers(subIDs []int, subUUIDs []string) error {
 
 // DeleteSubscribersByQuery deletes subscribers by a given arbitrary query expression.
 func (c *Core) DeleteSubscribersByQuery(query string, listIDs []int) error {
-	err := c.q.ExecSubscriberQueryTpl(sanitizeSQLExp(query), c.q.DeleteSubscribersByQuery, listIDs, c.db)
+	err := c.q.ExecSubQueryTpl(sanitizeSQLExp(query), c.q.DeleteSubscribersByQuery, listIDs, c.db)
 	if err != nil {
 		c.log.Printf("error deleting subscribers: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError,
@@ -430,4 +470,30 @@ func (c *Core) DeleteSubscriberBounces(id int, uuid string) error {
 	}
 
 	return nil
+}
+
+// DeleteOrphanSubscribers deletes orphan subscriber records (subscribers without lists).
+func (c *Core) DeleteOrphanSubscribers() (int, error) {
+	res, err := c.q.DeleteOrphanSubscribers.Exec()
+	if err != nil {
+		c.log.Printf("error deleting orphan subscribers: %v", err)
+		return 0, echo.NewHTTPError(http.StatusInternalServerError,
+			c.i18n.Ts("globals.messages.errorDeleting", "name", "{globals.terms.subscribers}", "error", pqErrMsg(err)))
+	}
+
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteBlocklistedSubscribers deletes blocklisted subscribers.
+func (c *Core) DeleteBlocklistedSubscribers() (int, error) {
+	res, err := c.q.DeleteBlocklistedSubscribers.Exec()
+	if err != nil {
+		c.log.Printf("error deleting blocklisted subscribers: %v", err)
+		return 0, echo.NewHTTPError(http.StatusInternalServerError,
+			c.i18n.Ts("globals.messages.errorDeleting", "name", "{globals.terms.subscribers}", "error", pqErrMsg(err)))
+	}
+
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

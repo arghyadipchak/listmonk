@@ -2,12 +2,14 @@ package models
 
 // Settings represents the app settings stored in the DB.
 type Settings struct {
+	AppSiteName           string   `json:"app.site_name"`
 	AppRootURL            string   `json:"app.root_url"`
 	AppLogoURL            string   `json:"app.logo_url"`
 	AppFaviconURL         string   `json:"app.favicon_url"`
 	AppFromEmail          string   `json:"app.from_email"`
 	AppNotifyEmails       []string `json:"app.notify_emails"`
 	EnablePublicSubPage   bool     `json:"app.enable_public_subscription_page"`
+	EnablePublicArchive   bool     `json:"app.enable_public_archive"`
 	SendOptinConfirmation bool     `json:"app.send_optin_confirmation"`
 	CheckUpdates          bool     `json:"app.check_updates"`
 	AppLang               string   `json:"app.lang"`
@@ -24,10 +26,15 @@ type Settings struct {
 	PrivacyIndividualTracking bool     `json:"privacy.individual_tracking"`
 	PrivacyUnsubHeader        bool     `json:"privacy.unsubscribe_header"`
 	PrivacyAllowBlocklist     bool     `json:"privacy.allow_blocklist"`
+	PrivacyAllowPreferences   bool     `json:"privacy.allow_preferences"`
 	PrivacyAllowExport        bool     `json:"privacy.allow_export"`
 	PrivacyAllowWipe          bool     `json:"privacy.allow_wipe"`
 	PrivacyExportable         []string `json:"privacy.exportable"`
 	DomainBlocklist           []string `json:"privacy.domain_blocklist"`
+
+	SecurityEnableCaptcha bool   `json:"security.enable_captcha"`
+	SecurityCaptchaKey    string `json:"security.captcha_key"`
+	SecurityCaptchaSecret string `json:"security.captcha_secret"`
 
 	UploadProvider             string `json:"upload.provider"`
 	UploadFilesystemUploadPath string `json:"upload.filesystem.upload_path"`

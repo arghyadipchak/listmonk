@@ -17,6 +17,7 @@ import (
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/buflog"
+	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
@@ -24,6 +25,7 @@ import (
 	"github.com/knadh/listmonk/internal/messenger"
 	"github.com/knadh/listmonk/internal/subimporter"
 	"github.com/knadh/listmonk/models"
+	"github.com/knadh/paginator"
 	"github.com/knadh/stuffbin"
 )
 
@@ -45,6 +47,8 @@ type App struct {
 	media      media.Store
 	i18n       *i18n.I18n
 	bounce     *bounce.Manager
+	paginator  *paginator.Paginator
+	captcha    *captcha.Captcha
 	notifTpls  *notifTpls
 	log        *log.Logger
 	bufLog     *buflog.BufLog
@@ -166,6 +170,16 @@ func main() {
 		messengers: make(map[string]messenger.Messenger),
 		log:        lo,
 		bufLog:     bufLog,
+		captcha:    initCaptcha(),
+
+		paginator: paginator.New(paginator.Opt{
+			DefaultPerPage: 20,
+			MaxPerPage:     50,
+			NumPageNums:    10,
+			PageParam:      "page",
+			PerPageParam:   "per_page",
+			AllowAll:       true,
+		}),
 	}
 
 	// Load i18n language map.
@@ -189,6 +203,7 @@ func main() {
 	app.manager = initCampaignManager(app.queries, app.constants, app)
 	app.importer = initImporter(app.queries, db, app)
 	app.notifTpls = initNotifTemplates("/email-templates/*.html", fs, app.i18n, app.constants)
+	initTxTemplates(app.manager, app)
 
 	if ko.Bool("bounce.enabled") {
 		app.bounce = initBounceManager(app)

@@ -80,6 +80,10 @@ const (
 
 	BounceTypeHard = "hard"
 	BounceTypeSoft = "soft"
+
+	// Templates.
+	TemplateTypeCampaign = "campaign"
+	TemplateTypeTx       = "tx"
 )
 
 // Headers represents an array of string maps used to represent SMTP, HTTP headers etc.
@@ -112,7 +116,7 @@ var regTplFuncs = []regTplFunc{
 	},
 
 	{
-		regExp:  regexp.MustCompile(`{{(\s+)?(TrackView|UnsubscribeURL|OptinURL|MessageURL)(\s+)?}}`),
+		regExp:  regexp.MustCompile(`{{(\s+)?(TrackView|UnsubscribeURL|ManageURL|OptinURL|MessageURL)(\s+)?}}`),
 		replace: `{{ $2 . }}`,
 	},
 }
@@ -153,16 +157,23 @@ type User struct {
 type Subscriber struct {
 	Base
 
-	UUID    string            `db:"uuid" json:"uuid"`
-	Email   string            `db:"email" json:"email" form:"email"`
-	Name    string            `db:"name" json:"name" form:"name"`
-	Attribs SubscriberAttribs `db:"attribs" json:"attribs"`
-	Status  string            `db:"status" json:"status"`
-	Lists   types.JSONText    `db:"lists" json:"lists"`
+	UUID    string         `db:"uuid" json:"uuid"`
+	Email   string         `db:"email" json:"email" form:"email"`
+	Name    string         `db:"name" json:"name" form:"name"`
+	Attribs JSON           `db:"attribs" json:"attribs"`
+	Status  string         `db:"status" json:"status"`
+	Lists   types.JSONText `db:"lists" json:"lists"`
 }
 type subLists struct {
 	SubscriberID int            `db:"subscriber_id"`
 	Lists        types.JSONText `db:"lists"`
+}
+
+// Subscription represents a list attached to a subscriber.
+type Subscription struct {
+	List
+	SubscriptionStatus    null.String `db:"subscription_status" json:"subscription_status"`
+	SubscriptionCreatedAt null.String `db:"subscription_created_at" json:"subscription_created_at"`
 }
 
 // SubscriberExportProfile represents a subscriber's collated data in JSON for export.
@@ -174,8 +185,8 @@ type SubscriberExportProfile struct {
 	LinkClicks    json.RawMessage `db:"link_clicks" json:"link_clicks,omitempty"`
 }
 
-// SubscriberAttribs is the map of key:value attributes of a subscriber.
-type SubscriberAttribs map[string]interface{}
+// JSON is is the wrapper for reading and writing arbitrary JSONB fields from the DB.
+type JSON map[string]interface{}
 
 // StringIntMap is used to define DB Scan()s.
 type StringIntMap map[string]int
@@ -203,12 +214,15 @@ type List struct {
 	Type             string         `db:"type" json:"type"`
 	Optin            string         `db:"optin" json:"optin"`
 	Tags             pq.StringArray `db:"tags" json:"tags"`
+	Description      string         `db:"description" json:"description"`
 	SubscriberCount  int            `db:"-" json:"subscriber_count"`
 	SubscriberCounts StringIntMap   `db:"subscriber_statuses" json:"subscriber_statuses"`
 	SubscriberID     int            `db:"subscriber_id" json:"-"`
 
 	// This is only relevant when querying the lists of a subscriber.
-	SubscriptionStatus string `db:"subscription_status" json:"subscription_status,omitempty"`
+	SubscriptionStatus    string    `db:"subscription_status" json:"subscription_status,omitempty"`
+	SubscriptionCreatedAt null.Time `db:"subscription_created_at" json:"subscription_created_at,omitempty"`
+	SubscriptionUpdatedAt null.Time `db:"subscription_updated_at" json:"subscription_updated_at,omitempty"`
 
 	// Pseudofield for getting the total number of subscribers
 	// in searches and queries.
@@ -220,26 +234,30 @@ type Campaign struct {
 	Base
 	CampaignMeta
 
-	UUID        string         `db:"uuid" json:"uuid"`
-	Type        string         `db:"type" json:"type"`
-	Name        string         `db:"name" json:"name"`
-	Subject     string         `db:"subject" json:"subject"`
-	FromEmail   string         `db:"from_email" json:"from_email"`
-	Body        string         `db:"body" json:"body"`
-	AltBody     null.String    `db:"altbody" json:"altbody"`
-	SendAt      null.Time      `db:"send_at" json:"send_at"`
-	Status      string         `db:"status" json:"status"`
-	ContentType string         `db:"content_type" json:"content_type"`
-	Tags        pq.StringArray `db:"tags" json:"tags"`
-	Headers     Headers        `db:"headers" json:"headers"`
-	TemplateID  int            `db:"template_id" json:"template_id"`
-	Messenger   string         `db:"messenger" json:"messenger"`
+	UUID              string          `db:"uuid" json:"uuid"`
+	Type              string          `db:"type" json:"type"`
+	Name              string          `db:"name" json:"name"`
+	Subject           string          `db:"subject" json:"subject"`
+	FromEmail         string          `db:"from_email" json:"from_email"`
+	Body              string          `db:"body" json:"body"`
+	AltBody           null.String     `db:"altbody" json:"altbody"`
+	SendAt            null.Time       `db:"send_at" json:"send_at"`
+	Status            string          `db:"status" json:"status"`
+	ContentType       string          `db:"content_type" json:"content_type"`
+	Tags              pq.StringArray  `db:"tags" json:"tags"`
+	Headers           Headers         `db:"headers" json:"headers"`
+	TemplateID        int             `db:"template_id" json:"template_id"`
+	Messenger         string          `db:"messenger" json:"messenger"`
+	Archive           bool            `db:"archive" json:"archive"`
+	ArchiveTemplateID int             `db:"archive_template_id" json:"archive_template_id"`
+	ArchiveMeta       json.RawMessage `db:"archive_meta" json:"archive_meta"`
 
 	// TemplateBody is joined in from templates by the next-campaigns query.
-	TemplateBody string             `db:"template_body" json:"-"`
-	Tpl          *template.Template `json:"-"`
-	SubjectTpl   *txttpl.Template   `json:"-"`
-	AltBodyTpl   *template.Template `json:"-"`
+	TemplateBody        string             `db:"template_body" json:"-"`
+	ArchiveTemplateBody string             `db:"archive_template_body" json:"-"`
+	Tpl                 *template.Template `json:"-"`
+	SubjectTpl          *txttpl.Template   `json:"-"`
+	AltBodyTpl          *template.Template `json:"-"`
 
 	// Pseudofield for getting the total number of subscribers
 	// in searches and queries.
@@ -294,9 +312,16 @@ type Campaigns []Campaign
 type Template struct {
 	Base
 
-	Name      string `db:"name" json:"name"`
+	Name string `db:"name" json:"name"`
+	// Subject is only for type=tx.
+	Subject   string `db:"subject" json:"subject"`
+	Type      string `db:"type" json:"type"`
 	Body      string `db:"body" json:"body,omitempty"`
 	IsDefault bool   `db:"is_default" json:"is_default"`
+
+	// Only relevant to tx (transactional) templates.
+	SubjectTpl *txttpl.Template   `json:"-"`
+	Tpl        *template.Template `json:"-"`
 }
 
 // Bounce represents a single bounce event.
@@ -318,6 +343,28 @@ type Bounce struct {
 	// Pseudofield for getting the total number of bounces
 	// in searches and queries.
 	Total int `db:"total" json:"-"`
+}
+
+// TxMessage represents an e-mail campaign.
+type TxMessage struct {
+	SubscriberEmails []string `json:"subscriber_emails"`
+	SubscriberIDs    []int    `json:"subscriber_ids"`
+
+	// Deprecated.
+	SubscriberEmail string `json:"subscriber_email"`
+	SubscriberID    int    `json:"subscriber_id"`
+
+	TemplateID  int                    `json:"template_id"`
+	Data        map[string]interface{} `json:"data"`
+	FromEmail   string                 `json:"from_email"`
+	Headers     Headers                `json:"headers"`
+	ContentType string                 `json:"content_type"`
+	Messenger   string                 `json:"messenger"`
+
+	Subject    string             `json:"-"`
+	Body       []byte             `json:"-"`
+	Tpl        *template.Template `json:"-"`
+	SubjectTpl *txttpl.Template   `json:"-"`
 }
 
 // markdown is a global instance of Markdown parser and renderer.
@@ -369,14 +416,14 @@ func (subs Subscribers) LoadLists(stmt *sqlx.Stmt) error {
 }
 
 // Value returns the JSON marshalled SubscriberAttribs.
-func (s SubscriberAttribs) Value() (driver.Value, error) {
+func (s JSON) Value() (driver.Value, error) {
 	return json.Marshal(s)
 }
 
 // Scan unmarshals JSONB from the DB.
-func (s SubscriberAttribs) Scan(src interface{}) error {
+func (s JSON) Scan(src interface{}) error {
 	if src == nil {
-		s = make(SubscriberAttribs)
+		s = make(JSON)
 		return nil
 	}
 
@@ -435,6 +482,21 @@ func (camps Campaigns) LoadStats(stmt *sqlx.Stmt) error {
 // CompileTemplate compiles a campaign body template into its base
 // template and sets the resultant template to Campaign.Tpl.
 func (c *Campaign) CompileTemplate(f template.FuncMap) error {
+	// If the subject line has a template string, compile it.
+	if strings.Contains(c.Subject, "{{") {
+		subj := c.Subject
+		for _, r := range regTplFuncs {
+			subj = r.regExp.ReplaceAllString(subj, r.replace)
+		}
+
+		var txtFuncs map[string]interface{} = f
+		subjTpl, err := txttpl.New(ContentTpl).Funcs(txtFuncs).Parse(subj)
+		if err != nil {
+			return fmt.Errorf("error compiling subject: %v", err)
+		}
+		c.SubjectTpl = subjTpl
+	}
+
 	// Compile the base template.
 	body := c.TemplateBody
 	for _, r := range regTplFuncs {
@@ -471,21 +533,6 @@ func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 		return fmt.Errorf("error inserting child template: %v", err)
 	}
 	c.Tpl = out
-
-	// If the subject line has a template string, compile it.
-	if strings.Contains(c.Subject, "{{") {
-		subj := c.Subject
-		for _, r := range regTplFuncs {
-			subj = r.regExp.ReplaceAllString(subj, r.replace)
-		}
-
-		var txtFuncs map[string]interface{} = f
-		subjTpl, err := txttpl.New(ContentTpl).Funcs(txtFuncs).Parse(subj)
-		if err != nil {
-			return fmt.Errorf("error compiling subject: %v", err)
-		}
-		c.SubjectTpl = subjTpl
-	}
 
 	if strings.Contains(c.AltBody.String, "{{") {
 		b := c.AltBody.String
@@ -524,6 +571,58 @@ func (c *Campaign) ConvertContent(from, to string) (string, error) {
 	}
 
 	return out, nil
+}
+
+// Compile compiles a template body and subject (only for tx templates) and
+// caches the templat references to be executed later.
+func (t *Template) Compile(f template.FuncMap) error {
+	tpl, err := template.New(BaseTpl).Funcs(f).Parse(t.Body)
+	if err != nil {
+		return fmt.Errorf("error compiling transactional template: %v", err)
+	}
+	t.Tpl = tpl
+
+	// If the subject line has a template string, compile it.
+	if strings.Contains(t.Subject, "{{") {
+		subj := t.Subject
+
+		subjTpl, err := txttpl.New(BaseTpl).Funcs(txttpl.FuncMap(f)).Parse(subj)
+		if err != nil {
+			return fmt.Errorf("error compiling subject: %v", err)
+		}
+		t.SubjectTpl = subjTpl
+	}
+
+	return nil
+}
+
+func (m *TxMessage) Render(sub Subscriber, tpl *Template) error {
+	data := struct {
+		Subscriber Subscriber
+		Tx         *TxMessage
+	}{sub, m}
+
+	// Render the body.
+	b := bytes.Buffer{}
+	if err := tpl.Tpl.ExecuteTemplate(&b, BaseTpl, data); err != nil {
+		return err
+	}
+	m.Body = make([]byte, b.Len())
+	copy(m.Body, b.Bytes())
+	b.Reset()
+
+	// If the subject is also a template, render that.
+	if tpl.SubjectTpl != nil {
+		if err := tpl.SubjectTpl.ExecuteTemplate(&b, BaseTpl, data); err != nil {
+			return err
+		}
+		m.Subject = b.String()
+		b.Reset()
+	} else {
+		m.Subject = tpl.Subject
+	}
+
+	return nil
 }
 
 // FirstName splits the name by spaces and returns the first chunk
